@@ -100,27 +100,36 @@ class NodeServicer(mini2_pb2_grpc.NodeServiceServicer):
                    and query.lon_min <= r['longitude'] <= query.lon_max]
         return [to_proto(r) for r in out]
 
-    def _gather_peers(self, query):
+    def _call_peer(self, peer, query):
         opts = [
             ('grpc.max_receive_message_length', MAX_MSG),
             ('grpc.max_send_message_length',    MAX_MSG),
         ]
-        all_recs = []
-        for peer in self.peers:
-            try:
-                ch   = grpc.insecure_channel(peer['address'], options=opts)
-                stub = mini2_pb2_grpc.NodeServiceStub(ch)
-                resp = stub.Forward(query, timeout=60)
-                all_recs.extend(resp.records)
-            except Exception as e:
-                print(f"[{self.node_id}] forward to {peer['id']} failed: {e}",
-                      file=sys.stderr)
+        try:
+            ch   = grpc.insecure_channel(peer['address'], options=opts)
+            stub = mini2_pb2_grpc.NodeServiceStub(ch)
+            resp = stub.Forward(query, timeout=60)
+            return list(resp.records)
+        except Exception as e:
+            print(f"[{self.node_id}] forward to {peer['id']} failed: {e}", file=sys.stderr)
+            return []
+
+    def _gather_peers(self, query):
+        if not self.peers:
+            return []
+        with futures.ThreadPoolExecutor(max_workers=len(self.peers)) as ex:
+            futs = [ex.submit(self._call_peer, p, query) for p in self.peers]
+            all_recs = []
+            for f in futs:
+                all_recs.extend(f.result())
         return all_recs
 
     def Submit(self, request, context):
         req_id = f"{self.node_id}_{time.time_ns()}"
-        peer_recs  = self._gather_peers(request)
-        local_recs = self._search_local(request)
+        with futures.ThreadPoolExecutor(max_workers=2) as ex:
+            local_fut = ex.submit(self._search_local, request)
+            peer_recs  = self._gather_peers(request)
+            local_recs = local_fut.result()
         self._store[req_id] = list(peer_recs) + local_recs
         print(f"[{self.node_id}] Submit {req_id} total={len(self._store[req_id])}",
               file=sys.stderr)
@@ -143,8 +152,10 @@ class NodeServicer(mini2_pb2_grpc.NodeServiceServicer):
         return resp
 
     def Forward(self, request, context):
-        peer_recs  = self._gather_peers(request)
-        local_recs = self._search_local(request)
+        with futures.ThreadPoolExecutor(max_workers=2) as ex:
+            local_fut = ex.submit(self._search_local, request)
+            peer_recs  = self._gather_peers(request)
+            local_recs = local_fut.result()
         resp = mini2_pb2.ForwardResponse()
         resp.records.extend(peer_recs)
         resp.records.extend(local_recs)

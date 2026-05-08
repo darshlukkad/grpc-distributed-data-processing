@@ -152,13 +152,9 @@ static int splitCSV(const char* line, size_t llen, Field* out, int maxf) {
     return f;
 }
 
-static const char* skipLines(const char* p, const char* end, uint64_t n) {
-    for (uint64_t i = 0; i < n && p < end; ++i) {
-        const char* nl = static_cast<const char*>(memchr(p, '\n', end - p));
-        if (!nl) return end;
-        p = nl + 1;
-    }
-    return p;
+static const char* snapToLineStart(const char* q, const char* end) {
+    const char* nl = static_cast<const char*>(memchr(q, '\n', end - q));
+    return nl ? nl + 1 : end;
 }
 
 // ── Thread-local accumulator ───────────────────────────────────────────────────
@@ -227,8 +223,14 @@ void DataStore::load(const std::string& csv_path, uint64_t row_start, uint64_t r
     if (!p0) { munmap(const_cast<char*>(base), fsz); throw std::runtime_error("empty file"); }
     ++p0;
 
-    const char* rs = skipLines(p0, fend, row_start);
-    const char* re = skipLines(rs, fend, row_end - row_start + 1);
+    static constexpr uint64_t TOTAL_ROWS = 20129232ULL;
+    size_t data_bytes = fend - p0;
+
+    const char* rs = (row_start == 0) ? p0
+        : snapToLineStart(p0 + (size_t)((double)row_start / TOTAL_ROWS * data_bytes), fend);
+
+    const char* re = (row_end >= TOTAL_ROWS - 1) ? fend
+        : snapToLineStart(p0 + (size_t)((double)(row_end + 1) / TOTAL_ROWS * data_bytes), fend);
 
     int T = num_threads;
     size_t span = re - rs;
@@ -414,18 +416,32 @@ mini2::ServiceRecord DataStore::toProto(size_t i) const {
 std::vector<mini2::ServiceRecord> DataStore::searchByZip(uint32_t zip_min, uint32_t zip_max) const {
     std::vector<mini2::ServiceRecord> out;
     size_t n = incident_zip_.size();
-    for (size_t i = 0; i < n; ++i)
-        if (incident_zip_[i] >= zip_min && incident_zip_[i] <= zip_max)
-            out.push_back(toProto(i));
+    #pragma omp parallel num_threads(4)
+    {
+        std::vector<mini2::ServiceRecord> local;
+        #pragma omp for nowait schedule(static)
+        for (size_t i = 0; i < n; ++i)
+            if (incident_zip_[i] >= zip_min && incident_zip_[i] <= zip_max)
+                local.push_back(toProto(i));
+        #pragma omp critical
+        out.insert(out.end(), local.begin(), local.end());
+    }
     return out;
 }
 
 std::vector<mini2::ServiceRecord> DataStore::searchByDate(uint32_t date_min, uint32_t date_max) const {
     std::vector<mini2::ServiceRecord> out;
     size_t n = created_date_.size();
-    for (size_t i = 0; i < n; ++i)
-        if (created_date_[i] >= date_min && created_date_[i] <= date_max)
-            out.push_back(toProto(i));
+    #pragma omp parallel num_threads(4)
+    {
+        std::vector<mini2::ServiceRecord> local;
+        #pragma omp for nowait schedule(static)
+        for (size_t i = 0; i < n; ++i)
+            if (created_date_[i] >= date_min && created_date_[i] <= date_max)
+                local.push_back(toProto(i));
+        #pragma omp critical
+        out.insert(out.end(), local.begin(), local.end());
+    }
     return out;
 }
 
@@ -435,10 +451,17 @@ std::vector<mini2::ServiceRecord> DataStore::searchByBBox(double lat_min, double
     float fla = float(lat_min), flb = float(lat_max);
     float flo = float(lon_min), flp = float(lon_max);
     size_t n = latlon_.size();
-    for (size_t i = 0; i < n; ++i) {
-        float lat = latlon_[i].lat, lon = latlon_[i].lon;
-        if (lat >= fla && lat <= flb && lon >= flo && lon <= flp)
-            out.push_back(toProto(i));
+    #pragma omp parallel num_threads(4)
+    {
+        std::vector<mini2::ServiceRecord> local;
+        #pragma omp for nowait schedule(static)
+        for (size_t i = 0; i < n; ++i) {
+            float lat = latlon_[i].lat, lon = latlon_[i].lon;
+            if (lat >= fla && lat <= flb && lon >= flo && lon <= flp)
+                local.push_back(toProto(i));
+        }
+        #pragma omp critical
+        out.insert(out.end(), local.begin(), local.end());
     }
     return out;
 }

@@ -73,8 +73,9 @@ grpc::Status NodeService::Submit(grpc::ServerContext*,
     std::string req_id = generateRequestId();
     resp->set_request_id(req_id);
 
-    auto peer_recs  = gatherFromPeers(*req);
-    auto local_recs = searchLocal(*req);
+    auto local_future = std::async(std::launch::async, [&]{ return searchLocal(*req); });
+    auto peer_recs    = gatherFromPeers(*req);
+    auto local_recs   = local_future.get();
 
     peer_recs.insert(peer_recs.end(),
                      std::make_move_iterator(local_recs.begin()),
@@ -106,8 +107,9 @@ grpc::Status NodeService::Fetch(grpc::ServerContext*,
 grpc::Status NodeService::Forward(grpc::ServerContext*,
                                    const mini2::Query* req,
                                    mini2::ForwardResponse* resp) {
-    auto peer_recs  = gatherFromPeers(*req);
-    auto local_recs = searchLocal(*req);
+    auto local_future = std::async(std::launch::async, [&]{ return searchLocal(*req); });
+    auto peer_recs    = gatherFromPeers(*req);
+    auto local_recs   = local_future.get();
 
     for (auto& r : peer_recs)  *resp->add_records() = std::move(r);
     for (auto& r : local_recs) *resp->add_records() = std::move(r);
