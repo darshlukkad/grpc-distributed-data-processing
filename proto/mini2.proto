@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package mini2;
+
+enum QueryType {
+  ZIP_RANGE  = 0;
+  DATE_RANGE = 1;
+  BBOX       = 2;
+}
+
+message ServiceRecord {
+  uint64 unique_key   = 1;
+  uint32 created_date = 2;
+  uint32 incident_zip = 3;
+  float  latitude     = 4;
+  float  longitude    = 5;
+  uint32 borough      = 6;
+}
+
+message Query {
+  string    request_id = 1;
+  QueryType type       = 2;
+  uint32    zip_min    = 3;
+  uint32    zip_max    = 4;
+  uint32    date_min   = 5;
+  uint32    date_max   = 6;
+  double    lat_min    = 7;
+  double    lat_max    = 8;
+  double    lon_min    = 9;
+  double    lon_max    = 10;
+}
+
+message SubmitResponse {
+  string request_id = 1;
+}
+
+message FetchRequest {
+  string request_id = 1;
+  int32  chunk_idx  = 2;
+}
+
+message FetchResponse {
+  string                 request_id = 1;
+  int32                  chunk_idx  = 2;
+  repeated ServiceRecord records    = 3;
+  bool                   is_last    = 4;
+}
+
+message ForwardResponse {
+  repeated ServiceRecord records = 1;
+}
+
+message CancelRequest {
+  string request_id = 1;
+}
+
+message CancelResponse {}
+
+service NodeService {
+  rpc Submit  (Query)         returns (SubmitResponse);
+  rpc Fetch   (FetchRequest)  returns (FetchResponse);
+  rpc Forward (Query)         returns (ForwardResponse);
+  rpc Cancel  (CancelRequest) returns (CancelResponse);
+}
