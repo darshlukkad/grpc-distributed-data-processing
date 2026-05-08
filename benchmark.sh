@@ -67,7 +67,7 @@ run_suite() {
     local avg=$((total / 10))
     echo "----------------------------------------------------------------------"
     printf "%-4s  %-36s  %12s  %8s  %8s\n" "AVG" "" "" "" "${avg}ms"
-    echo "$avg"
+    echo "$avg" > /tmp/_bench_avg
 }
 
 echo ""
@@ -75,9 +75,9 @@ echo "======================================================================"
 echo "  Mini2 Benchmark  —  30 queries (10 per type)"
 echo "======================================================================"
 
-avg_zip=$(run_suite  "ZIP"  "${ZIP_CASES[@]}")
-avg_date=$(run_suite "DATE" "${DATE_CASES[@]}")
-avg_bbox=$(run_suite "BBOX" "${BBOX_CASES[@]}")
+run_suite "ZIP"  "${ZIP_CASES[@]}";  avg_zip=$(cat /tmp/_bench_avg)
+run_suite "DATE" "${DATE_CASES[@]}"; avg_date=$(cat /tmp/_bench_avg)
+run_suite "BBOX" "${BBOX_CASES[@]}"; avg_bbox=$(cat /tmp/_bench_avg)
 
 overall=$(( (avg_zip + avg_date + avg_bbox) / 3 ))
 
