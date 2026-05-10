@@ -37,6 +37,7 @@ message SubmitResponse {
 message FetchRequest {
   string request_id = 1;
   int32  chunk_idx  = 2;
+  int32  chunk_size = 3;
 }
 
 message FetchResponse {

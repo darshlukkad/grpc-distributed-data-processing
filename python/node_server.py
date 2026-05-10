@@ -141,8 +141,9 @@ class NodeServicer(mini2_pb2_grpc.NodeServiceServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             context.set_details('unknown request_id')
             return mini2_pb2.FetchResponse()
-        start = request.chunk_idx * CHUNK
-        end   = min(len(recs), start + CHUNK)
+        csize = request.chunk_size if request.chunk_size > 0 else CHUNK
+        start = request.chunk_idx
+        end   = min(len(recs), start + csize)
         resp  = mini2_pb2.FetchResponse(
             request_id=request.request_id,
             chunk_idx=request.chunk_idx,

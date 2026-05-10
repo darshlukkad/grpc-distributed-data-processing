@@ -80,20 +80,23 @@ int main(int argc, char** argv) {
     std::string req_id = sub_resp.request_id();
     std::cerr << "request_id: " << req_id << "\n";
 
-    uint64_t total = 0;
-    int chunk_idx  = 0;
-    bool done      = false;
+    uint64_t total    = 0;
+    int      offset   = 0;
+    int      csize    = 500;
+    int      num_chunks = 0;
+    bool     done     = false;
 
     while (!done) {
         grpc::ClientContext fetch_ctx;
         mini2::FetchRequest freq;
         freq.set_request_id(req_id);
-        freq.set_chunk_idx(chunk_idx);
+        freq.set_chunk_idx(offset);
+        freq.set_chunk_size(csize);
 
         mini2::FetchResponse fresp;
         st = stub->Fetch(&fetch_ctx, freq, &fresp);
         if (!st.ok()) {
-            std::cerr << "Fetch[" << chunk_idx << "] failed: " << st.error_message() << "\n";
+            std::cerr << "Fetch[" << offset << "] failed: " << st.error_message() << "\n";
             break;
         }
 
@@ -104,16 +107,19 @@ int main(int argc, char** argv) {
                       << r.latitude() << ","
                       << r.longitude() << "\n";
 
-        total += static_cast<uint64_t>(fresp.records_size());
-        done = fresp.is_last();
-        ++chunk_idx;
+        int got = fresp.records_size();
+        total  += static_cast<uint64_t>(got);
+        offset += got;
+        done    = fresp.is_last();
+        ++num_chunks;
+        if (csize < 50000) csize = std::min(csize * 2, 50000);
     }
 
     auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      std::chrono::steady_clock::now() - t0).count();
 
     std::cerr << "total_records=" << total
-              << " chunks=" << chunk_idx
+              << " chunks=" << num_chunks
               << " dt_ms=" << dt_ms << "\n";
     return 0;
 }

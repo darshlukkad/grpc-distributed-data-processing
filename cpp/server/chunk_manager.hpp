@@ -11,7 +11,7 @@ public:
     explicit ChunkManager(int chunk_size = 500) : chunk_size_(chunk_size) {}
 
     void store(const std::string& req_id, std::vector<mini2::ServiceRecord> records);
-    bool fetch(const std::string& req_id, int chunk_idx,
+    bool fetch(const std::string& req_id, int chunk_idx, int chunk_size,
                std::vector<mini2::ServiceRecord>& out, bool& is_last) const;
     void cancel(const std::string& req_id);
     bool exists(const std::string& req_id) const;

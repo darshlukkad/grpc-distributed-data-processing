@@ -96,7 +96,7 @@ grpc::Status NodeService::Fetch(grpc::ServerContext*,
 
     std::vector<mini2::ServiceRecord> recs;
     bool is_last = false;
-    if (!chunks_.fetch(req->request_id(), req->chunk_idx(), recs, is_last))
+    if (!chunks_.fetch(req->request_id(), req->chunk_idx(), req->chunk_size(), recs, is_last))
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown or cancelled request_id");
 
     for (auto& r : recs) *resp->add_records() = std::move(r);
