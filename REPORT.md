@@ -343,7 +343,79 @@ Variance across runs (e.g. 22,069 ms vs. 44,552 ms for ZIP) is due to OS schedul
 
 ---
 
-## 13. Hardware
+## 13. Future Enhancements
+
+### Fault Tolerance and Failover Recovery
+
+Currently, if a node goes down mid-query, its data is silently dropped — node E's `Forward` to F fails, returns empty, and A assembles an incomplete result set with no error to the client. The following describes a practical fault tolerance design for this system.
+
+#### Current Behavior on Node Failure
+
+`gatherFromPeers()` already wraps each peer RPC in a try/catch — a failed `Forward` logs an error and returns an empty vector. The system does not crash, but the query result is silently incomplete. The client has no way to know that node F's ~2.2M rows were not included.
+
+#### Layer 1: Retry with Exponential Backoff
+
+The first line of defense is retrying transient failures. Instead of returning empty immediately on a failed `Forward`, the parent node retries 2–3 times with a short delay:
+
+```
+Attempt 1 → fail → wait 200ms
+Attempt 2 → fail → wait 400ms
+Attempt 3 → fail → give up, return empty
+```
+
+This handles brief network hiccups, momentary overload, or a node that is mid-restart. No architectural changes required — only the retry loop in `gatherFromPeers()` needs updating. Cost: adds up to ~600ms latency on the failing node's branch, which runs in parallel with other peers so the impact on total query time is minimal.
+
+#### Layer 2: Watchdog Process (Automatic Restart)
+
+A separate watchdog process runs on each machine. It periodically pings each local node's gRPC port (every 5–10 seconds). If a node stops responding after N consecutive failed pings, the watchdog restarts it:
+
+```bash
+./node_server --id F --config ../../config/topology.json
+```
+
+The watchdog does not need to know about query state — it simply ensures the process is alive. When the node comes back up, it reloads its CSV slice from disk (~60–90 seconds for C++ nodes) and resumes handling `Forward` RPCs normally. Future queries after recovery get correct results.
+
+**Limitation:** During the reload window (~60–90 seconds), the restarted node's data is still unavailable. Queries submitted during this window will be answered with incomplete data (node F's rows missing). This is the fundamental gap that Layer 3 addresses.
+
+#### Layer 3: Replication (Zero-Downtime Recovery)
+
+To eliminate the reload window gap entirely, each row range would be held by two nodes instead of one — a primary and a replica. For example:
+
+```
+Row range 11M–13.4M: primary = F, replica = F'
+```
+
+If F goes down, E detects the failure and immediately re-issues the `Forward` to F' instead. F' has the same data already loaded in memory — no reload delay, no data gap. This is the design used by distributed databases (Cassandra, Kafka, etc.).
+
+**What this requires:**
+- Each node starts with a `replica_peers` list in `topology.json`
+- On Forward failure, the node retries against the replica address
+- Both primary and replica must stay in sync — since data is static (loaded once at startup and never modified), sync is trivially guaranteed: both nodes load the same row range from the same CSV
+
+**Implementation cost:** moderate — `topology.json` gets a `replicas` key per node, `gatherFromPeers()` falls back to replica on failure. No changes to the proto or search logic.
+
+#### Layer 4: Client-Side Awareness
+
+Currently the client has no visibility into node failures. An enhanced design would:
+
+1. Include a `nodes_failed` repeated field in `SubmitResponse` listing any peers that did not respond
+2. The client can then decide: accept partial results, retry the query, or alert the user
+3. The `Cancel` RPC already exists — if the client detects a failure, it can cancel the partial result and resubmit after the node recovers
+
+#### Summary of Layers
+
+| Layer | What it handles | Recovery time | Complexity |
+|-------|----------------|---------------|------------|
+| Retry with backoff | Transient failures, brief restarts | ~600ms added latency | Low |
+| Watchdog + restart | Crashed processes | 60–90s data gap | Low |
+| Replication | Crashed processes with zero downtime | Instantaneous | Medium |
+| Client awareness | Partial result detection + user control | N/A | Low |
+
+The watchdog + retry approach (Layers 1 + 2) is achievable with minimal code changes and gives practical fault tolerance for this two-machine setup. Replication (Layer 3) would be the natural next step for a production deployment.
+
+---
+
+## 14. Hardware
 
 - 2× Apple M-series Mac (ARM64, macOS 14), 16 GB RAM each
 - Connected via RJ45 through a D-Link switch (~1 Gbps)
