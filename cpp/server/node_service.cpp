@@ -101,6 +101,7 @@ grpc::Status NodeService::Fetch(grpc::ServerContext*,
 
     for (auto& r : recs) *resp->add_records() = std::move(r);
     resp->set_is_last(is_last);
+    if (is_last) chunks_.cancel(req->request_id());
     return grpc::Status::OK;
 }
 

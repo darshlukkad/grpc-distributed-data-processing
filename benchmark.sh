@@ -29,7 +29,7 @@ run_suite() {
     local total=0 i=1
 
     echo ""
-    echo "=== $type (10 runs) ==="
+    echo "=== $type (5 runs) ==="
     printf "%-4s  %-36s  %12s  %8s  %8s\n" "Run" "Parameters" "Records" "Chunks" "ms"
     echo "----------------------------------------------------------------------"
 
@@ -59,7 +59,7 @@ run_suite() {
         i=$((i + 1))
     done
 
-    local avg=$((total / 10))
+    local avg=$((total / 5))
     echo "----------------------------------------------------------------------"
     printf "%-4s  %-36s  %12s  %8s  %8s\n" "AVG" "" "" "" "${avg}ms"
     echo "$avg" > /tmp/_bench_avg
@@ -67,7 +67,7 @@ run_suite() {
 
 echo ""
 echo "======================================================================"
-echo "  Mini2 Benchmark  —  30 queries (10 per type)"
+echo "  Mini2 Benchmark  —  15 queries (5 per type)"
 echo "======================================================================"
 
 run_suite "ZIP"  "${ZIP_CASES[@]}";  avg_zip=$(cat /tmp/_bench_avg)

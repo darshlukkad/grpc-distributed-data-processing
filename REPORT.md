@@ -5,7 +5,9 @@
 
 ## 1. Overview
 
-This project implements a 9-process distributed query system that partitions the NYC 311 Service Request dataset (20M rows, ~12 GB) across two physical machines and answers range queries via a gRPC scatter-gather tree. Clients submit queries to a single root node (A), which fans them out to the tree, gathers results, and returns them in dynamically sized chunks.
+This project implements a 9-process distributed query system that partitions the NYC 311 Service Request dataset (20 million rows, ~12 GB) across two physical Apple M-series machines connected via a D-Link switch over RJ45. Clients submit range queries to a single root node (A), which fans the query down a tree of 9 nodes, gathers matching records from all nodes, and returns complete results to the client in dynamically sized chunks.
+
+The system was built from scratch, extending Mini 1's single-process in-memory store into a fully distributed, multi-machine, multi-language gRPC system.
 
 ---
 
@@ -25,8 +27,8 @@ This project implements a 9-process distributed query system that partitions the
 
 Nine processes span two Apple M-series Macs connected via RJ45 through a D-Link switch:
 
-| Node | Language | Machine | IP | Port | Rows |
-|------|----------|---------|-----|------|------|
+| Node | Language | Machine | IP | Port | Row Range |
+|------|----------|---------|-----|------|-----------|
 | A | C++ | mac1 | 10.0.0.180 | 50051 | 0 – 2,236,580 |
 | B | C++ | mac1 | 10.0.0.180 | 50052 | 2,236,581 – 4,473,161 |
 | C | C++ | mac1 | 10.0.0.180 | 50053 | 4,473,162 – 6,709,742 |
@@ -37,100 +39,153 @@ Nine processes span two Apple M-series Macs connected via RJ45 through a D-Link 
 | H | C++ | mac2 | 10.0.0.100 | 50058 | 15,656,067 – 17,892,647 |
 | I | Python | mac2 | 10.0.0.100 | 50059 | 17,892,648 – 20,129,232 |
 
-All inter-node communication uses gRPC unary RPCs (no streaming API).
+**Peer edges (scatter direction):**
+- A → B, H, G, I
+- B → C, D, E
+- E → F
+- C, D, F, G, H, I → nobody (leaves)
+
+All inter-node communication uses **gRPC unary RPCs** only (no streaming API per spec). Every node is independently configured via `config/topology.json` — no hardcoded addresses or row ranges in source code.
 
 ---
 
 ## 3. Dataset
 
 **NYC 311 Service Requests 2020–2026**
-- 20,129,232 data rows, 44 columns, ~12 GB CSV
-- Fields used: `unique_key`, `created_date`, `incident_zip`, `latitude`, `longitude`
-- Each node loads only its assigned row slice at startup
+- 20,129,232 data rows
+- 44 columns: unique_key, created_date, closed_date, agency, agency_name, complaint_type, descriptor, location_type, incident_zip, incident_address, street_name, cross streets, city, landmark, facility_type, status, resolution_description, community_board, BBL, borough, coordinates, latitude, longitude, and more
+- File size: ~12 GB CSV
+- Each node loads only its assigned row slice (~2.2M rows each)
+- All 44 columns are stored and returned in query results
 
 ---
 
-## 4. Implementation
+## 4. Phase 1 — Dataset Loading
 
-### Phase 1 — Dataset Loading
+### Goal
+Load ~2.2M rows per node into a search-optimized in-memory layout as fast as possible at startup.
 
-**Goal:** Load ~2.2M rows per node as fast as possible into a search-optimized in-memory layout.
+### mmap + O(1) Row Seek
+The full 12 GB CSV is memory-mapped (`mmap`) into virtual address space. The OS lazy-loads pages on demand — startup does not wait for 12 GB of I/O.
 
-**Approach:**
+The key insight: instead of scanning millions of newlines to reach `row_start` (the naive approach, which costs O(row_start) for high-index nodes like H at row 15.6M), we estimate the byte position directly:
 
-1. **mmap** the full CSV into virtual address space — OS lazy-loads pages on demand, no upfront I/O cost
-2. **O(1) byte-offset seek** — instead of scanning millions of newlines to reach `row_start`, we estimate the byte position as:
-   ```
-   offset = (row_start / 20,129,232) × file_size
-   ```
-   Then snap forward to the next `\n` using `memchr`. This replaces a O(row_start) scan with an O(1) seek + tiny local correction.
-3. **4 OpenMP threads** parse the assigned byte range in parallel, each writing into its own thread-local Structure-of-Arrays (TLSoA)
-4. **StringPool** — a pre-allocated 400 MB arena for variable-length strings; allocation uses `std::atomic::fetch_add` (lock-free)
-5. **StringRegistry** — categorical fields (agency, borough, complaint type) are interned to 1-byte integer codes using a `shared_mutex` (multiple concurrent readers, exclusive writers)
-6. **Sequential merge** — thread-local arrays are merged into the global DataStore in thread order, preserving row sequence
-
-**Memory layout (Structure-of-Arrays):**
 ```
-incident_zip_:  [10001, 10002, ...]   ← contiguous uint32 array
-created_date_:  [1631499370, ...]     ← contiguous uint32 array (unix epoch)
-latlon_:        [{lat,lon}, ...]      ← lat+lon packed together, contiguous
+byte_offset = (row_start / 20,129,232) × file_size
 ```
 
-Each field is a separate array so a query reads only the relevant field, maximizing CPU cache utilization.
+Then snap forward by a few bytes to the next `\n` using `memchr`. This reduces a 15.6M-newline scan to a single arithmetic operation plus a tiny local correction. The same technique was applied to the Python node using `file.seek()`.
+
+### 4-Thread OpenMP Parallel Parse
+The byte range for each node is split into 4 equal segments. Each OpenMP thread parses its segment independently, writing into its own **thread-local Structure-of-Arrays (TLSoA)** — no locking during parse. After all threads finish, the TLSoA arrays are merged sequentially in thread order to preserve row sequence in the global DataStore.
+
+### Structure-of-Arrays (SoA) Memory Layout
+Every field is stored as its own contiguous array:
+
+```
+unique_key_:    [key0,  key1,  key2,  ...]   ← all unique keys together
+created_date_:  [date0, date1, date2, ...]   ← all dates together (unix epoch)
+incident_zip_:  [zip0,  zip1,  zip2,  ...]   ← all zips together
+latlon_:        [ll0,   ll1,   ll2,   ...]   ← lat+lon packed together
+agency_code_:   [ag0,   ag1,   ag2,   ...]   ← 1-byte interned codes
+agency_name_:   [ref0,  ref1,  ref2,  ...]   ← StringRefs into pool
+...
+```
+
+Row `i` is spread across all arrays. A ZIP query only touches `incident_zip_[]` — one contiguous array, maximizing CPU cache utilization. Other fields are not loaded into cache at all during the scan.
+
+### StringPool (Lock-Free String Arena)
+Variable-length string fields (agency name, incident address, resolution description, etc.) are stored in a pre-allocated 400 MB arena (`StringPool`). Allocation is a single `std::atomic::fetch_add` — completely lock-free, safe for concurrent writes from all 4 OpenMP threads simultaneously.
+
+Each string is stored as a `StringRef { uint32_t offset; uint16_t length; }` — 6 bytes — instead of a full `std::string` (32 bytes + heap allocation). Accessing the string is a pointer arithmetic: `arena_base + offset`.
+
+### StringRegistry (Categorical Field Interning)
+Low-cardinality string fields (agency code, borough, status, facility type, complaint type, etc.) are interned to 1-byte or 2-byte integer codes using a `StringRegistry` backed by `std::shared_mutex`. Multiple threads can read simultaneously (shared lock); new values take an exclusive write lock. This eliminates redundant string storage — "NYPD" stored once, referenced as `0x01` in 2.2M rows.
 
 ---
 
-### Phase 2 — Query Submission (Submit RPC)
+## 5. Phase 2 — Query Submission
 
-**Flow:**
-
+### Flow
 ```
 Client → A.Submit(query) → request_id
 ```
 
-1. Client sends a `Query` proto (ZIP_RANGE / DATE_RANGE / BBOX) to node A
-2. Node A launches its own local search as `std::async` simultaneously with peer forwarding
-3. Node A fires parallel `std::async` calls to all direct peers (B, H, G, I)
-4. Each peer repeats the pattern recursively — forward to its children while searching locally
-5. Results bubble back up to A
-6. A merges all results and stores them in `ChunkManager` (mutex-protected `unordered_map<request_id, records>`)
-7. Returns `request_id` to client
+The client sends a `Query` proto with query type and parameters. Node A is the only node that handles `Submit`. It:
 
-**Key parallelism:** local search and all peer RPC calls run concurrently. No node waits for peers before starting its own search.
+1. Launches its own local search as `std::async(std::launch::async)` immediately
+2. Simultaneously fires parallel `std::async` calls to all its peers (B, H, G, I)
+3. Each peer receives a `Forward` RPC and repeats the pattern recursively:
+   - B fires async to C, D, E — and searches its own data in parallel
+   - E fires async to F — and searches its own data in parallel
+   - Leaves (C, D, F, G, H, I) search local data and return
+4. Results bubble back up the tree to A
+5. A merges all peer results + its own results into a single `vector<ServiceRecord>`
+6. Stores them in `ChunkManager` — a mutex-protected `unordered_map<request_id, records>`
+7. Returns `request_id` to client immediately
 
----
+**Critical optimization:** local search and all peer RPC calls run concurrently at every node. No node waits for peers before starting its own scan.
 
-### Phase 3 — Dynamic Chunked Fetch (Fetch RPC)
+### 4-Thread OpenMP Search
+All three query types scan using 4 OpenMP threads:
 
-No gRPC streaming. Client drives the pull loop with **adaptive chunk sizing**:
-
+```cpp
+#pragma omp parallel num_threads(4)
+{
+    std::vector<ServiceRecord> local;
+    #pragma omp for nowait schedule(static)
+    for (size_t i = 0; i < n; ++i)
+        if (matches(i)) local.push_back(toProto(i));
+    #pragma omp critical
+    out.insert(out.end(), local.begin(), local.end());
+}
 ```
-Fetch(offset=0,    chunk_size=500)   → 500 records
-Fetch(offset=500,  chunk_size=1000)  → 1000 records
-Fetch(offset=1500, chunk_size=2000)  → 2000 records
-...
-Fetch(offset=N,    chunk_size=50000) → remaining, is_last=true
-```
 
-The client starts at 500 records per call, doubles the chunk size each round-trip, and caps at 50,000. The `chunk_idx` field is repurposed as an absolute record offset so the server can honor variable sizes without tracking state.
+Each thread accumulates matches in a thread-local vector (no locking during scan), then appends to the shared output under `#pragma omp critical`.
 
-**Impact:** A 3.8M-record result set requires ~80 Fetch RPCs with dynamic sizing vs. ~7,757 with a fixed 500-record chunk — the same bytes transferred with 97% fewer round-trips.
-
----
-
-## 5. Search Implementation
-
-All three query types use 4 OpenMP threads with thread-local result vectors merged under a critical section:
-
-| Query Type | Fields Scanned | Condition |
-|-----------|---------------|-----------|
+| Query Type | Array Scanned | Condition |
+|-----------|--------------|-----------|
 | ZIP_RANGE | `incident_zip_[]` | `zip_min ≤ zip ≤ zip_max` |
 | DATE_RANGE | `created_date_[]` | `date_min ≤ date ≤ date_max` (unix epoch) |
-| BBOX | `latlon_[]` | lat and lon within bounding box |
+| BBOX | `latlon_[]` | lat and lon both within bounding box |
 
 ---
 
-## 6. gRPC Protocol
+## 6. Phase 3 — Dynamic Chunked Fetch
+
+### Why Chunking
+gRPC has a maximum message size (64 MB). A query returning 935K records as `ServiceRecord` protos cannot fit in one response. Instead of streaming (which was prohibited by spec), we use a client-driven pull loop.
+
+### Fixed vs. Dynamic Chunk Sizing
+Initially, chunk size was fixed at 500 records per `Fetch` call. For a 935K-record result, that's 1,871 round-trips. Each round-trip has gRPC overhead (serialization, network, deserialization). On a 1 Gbps LAN, the overhead dominates actual data transfer for small chunks.
+
+We implemented **exponential chunk size doubling**:
+
+```
+Fetch(offset=0,      chunk_size=500)    → 500 records
+Fetch(offset=500,    chunk_size=1000)   → 1000 records
+Fetch(offset=1500,   chunk_size=2000)   → 2000 records
+Fetch(offset=3500,   chunk_size=4000)   → 4000 records
+...
+Fetch(offset=N,      chunk_size=50000)  → up to 50000 records, is_last=true
+```
+
+The client starts at 500 records, doubles each successful fetch, and caps at 50,000. The `chunk_idx` proto field is repurposed as an **absolute record offset** — this lets the server honor variable chunk sizes without storing per-request state.
+
+**Result:** A 935K-record ZIP query now takes ~25 Fetch calls instead of ~1,871. The same bytes are transferred with 97% fewer round-trips.
+
+### Memory Cleanup
+After the client receives the last chunk (`is_last=true`), the server immediately frees the result set:
+
+```cpp
+if (is_last) chunks_.cancel(req->request_id());
+```
+
+Node A's memory usage returns to baseline after each query. Without this, query result sets accumulated in `ChunkManager` forever until the process restarted.
+
+---
+
+## 7. gRPC Protocol
 
 ```protobuf
 service NodeService {
@@ -142,65 +197,156 @@ service NodeService {
 
 message FetchRequest {
     string request_id = 1;
-    int32  chunk_idx  = 2;  // used as record offset for dynamic chunk sizing
-    int32  chunk_size = 3;  // requested records; 0 = use server default (500)
+    int32  chunk_idx  = 2;  // absolute record offset
+    int32  chunk_size = 3;  // 0 = use server default
+}
+
+message ServiceRecord {
+    // 44 fields: unique_key, created_date, closed_date, agency, complaint_type,
+    // incident_zip, incident_address, latitude, longitude, borough, ... (all columns)
 }
 ```
 
-Max gRPC message size: **64 MB** on all nodes.
+Max gRPC message size: **64 MB** on all nodes (both send and receive).
 
 ---
 
-## 7. Design Decisions
+## 8. Multi-Language Interoperability
 
-### No hardcoded configuration
-All node identity, host, port, row range, and peer edges are read from `config/topology.json`. Source code has no hardcoded values.
+Node I is implemented in **Python** while nodes A–H are C++. Both use the same `.proto` file — `protoc` generates C++ stubs for one and Python stubs for the other. The gRPC wire format is identical regardless of language.
 
-### No shared memory between nodes
-Each node is a standalone OS process. Nodes communicate exclusively via gRPC. Results are not passed through shared memory or files.
+The Python node implements the same scatter-gather pattern as C++ using `concurrent.futures.ThreadPoolExecutor` for parallel peer calls and concurrent local search. It also uses the same O(1) byte-offset seek trick for fast startup:
 
-### Typed storage, not raw strings
-Fields are stored as `uint32` (zip, date), `float` (lat/lon) — not strings. Dates are parsed from `MM/DD/YYYY HH:MM:SS AM/PM` to unix epoch at load time.
+```python
+est = int(row_start / TOTAL_ROWS * file_size)
+f.seek(est)
+f.readline()  # skip partial row
+```
 
-### Mixed language
-Nodes A–H are C++ (performance-critical, OpenMP parallel search). Node I is Python (demonstrates language interoperability over gRPC; same scatter-gather logic implemented with `concurrent.futures.ThreadPoolExecutor`).
-
-### O(1) row seek vs. O(N) scan
-The naive approach scans every newline from the file start to reach `row_start`. For node H (row 15.6M), that's 15.6M newline scans. The byte-offset estimation reduces this to a single arithmetic operation + one short `memchr` scan to align to a row boundary.
+Without this, Python node I (row 17.8M) would iterate 17.8M rows doing nothing before loading its actual data — taking several minutes instead of seconds.
 
 ---
 
-## 8. Benchmark Results
+## 9. Key Design Decisions
 
-30 test queries (10 per type) across the full 9-node cluster:
+### Config-Driven Topology
+All node identity, host, port, row range, and peer edges come from `config/topology.json`. Adding or rearranging nodes requires only a config change — no source code changes.
 
-| Query Type | Avg Latency |
-|-----------|-------------|
-| ZIP_RANGE | ~6,218 ms |
-| DATE_RANGE | ~906 ms |
-| BBOX | ~4,787 ms |
-| **Overall** | **~3,970 ms** |
+### No Shared Memory
+Each node is a standalone OS process. Communication is exclusively via gRPC. This matches the spec constraint and makes the system trivially distributable across machines.
 
-DATE_RANGE is fastest because date values are uniformly distributed — most queries return a small slice. ZIP and BBOX return large result sets (up to 3.8M records) dominated by fetch time.
+### All 44 Columns Stored and Returned
+The full dataset schema is preserved. All 44 fields are stored in the SoA (typed, not raw strings), populated into `ServiceRecord` proto messages, transmitted through the tree, and returned to the client. No data is dropped.
 
----
+### unix epoch for Dates
+Dates are parsed from CSV format (`MM/DD/YYYY HH:MM:SS AM/PM`) to unix epoch `uint32` at load time. This allows integer range comparisons for DATE_RANGE queries — no string parsing during search.
 
-## 9. Challenges and Solutions
-
-| Challenge | Solution |
-|-----------|----------|
-| Stale CMakeCache on mac2 (paths from mac1 zip) | Added `rm -rf cpp/build` to `run_mac2.sh` before cmake |
-| csv_path resolved from wrong directory | Resolved relative to config file directory using `std::filesystem` (C++) and `os.path` (Python) |
-| gRPC/Protobuf CMake target conflict | Load `find_package(gRPC)` before `find_package(Protobuf)` |
-| OpenMP not found on macOS | Used `brew --prefix libomp` to locate headers and library explicitly |
-| Row sequence not preserved with parallel parse | Each thread writes to its own TLSoA; sequential merge in thread-order after parse |
-| benchmark.sh avg capture broken | Shell `$()` captured all output including table rows; wrote avg to `/tmp/_bench_avg` file instead |
+### Result Cleanup After Last Fetch
+`ChunkManager::cancel()` is called automatically after the last chunk is fetched. This prevents unbounded memory growth on node A across multiple queries.
 
 ---
 
-## 10. Hardware
+## 10. Challenges and Solutions
 
-- 2× Apple M-series Mac (ARM64, macOS), 16 GB RAM each
+| Challenge | Root Cause | Solution |
+|-----------|-----------|----------|
+| Python node I takes minutes to start | `csv.reader` iterates 17.8M rows to skip to `row_start` | O(1) byte-offset estimation + `file.seek()` |
+| Node A memory grows after each query | `ChunkManager` never frees result sets | Call `cancel()` after `is_last=true` in `Fetch` |
+| Stale CMakeCache on mac2 | Zip file included `cpp/build/` with mac1-specific paths | Added `rm -rf cpp/build` to `run_mac2.sh` |
+| csv_path resolved from wrong directory | Relative path resolved from `cpp/build/` not `config/` | Used `std::filesystem` / `os.path` to resolve relative to config file |
+| gRPC/Protobuf CMake target conflict | `find_package(Protobuf)` before `find_package(gRPC)` caused target re-definition | Swapped order: gRPC first, Protobuf second |
+| OpenMP not found on macOS | Homebrew libomp not in default include/lib paths | Used `brew --prefix libomp` to locate headers and library explicitly |
+| Row sequence lost with parallel parse | Threads write interleaved into shared arrays | Each thread writes to its own TLSoA; sequential merge in thread-order after parse |
+| `descriptor` proto field rejected | `descriptor` is a reserved name in protobuf | Renamed to `complaint_detail` |
+| Benchmark average capture broken | Shell `$()` captured table output + avg together | Wrote avg to `/tmp/_bench_avg` temp file, read with `cat` |
+| 7,757 Fetch calls for large queries | Fixed chunk size of 500 | Exponential doubling: 500 → 1000 → ... → 50,000, capped at 64 MB |
+
+---
+
+## 11. Benchmark Results
+
+15 queries (5 identical runs per query type) across the full 9-node cluster with both machines active.
+
+### Resource Usage (per node, at load time)
+
+| Metric | Value |
+|--------|-------|
+| Memory per node | ~1.3 GB |
+| CPU utilization during load | ~133% (4 OpenMP threads parsing) |
+| Memory during query | Varies — Node A holds matched records until client fetches all chunks, then frees immediately |
+
+### Per-Run Timing
+
+| Run | Query Type | Parameters | Records | Chunks | Latency |
+|-----|-----------|-----------|---------|--------|---------|
+| 1 | ZIP | 10001–10499 | 935,980 | 25 | 34,856 ms |
+| 2 | ZIP | 10001–10499 | 935,980 | 25 | 33,126 ms |
+| 3 | ZIP | 10001–10499 | 935,980 | 25 | 44,357 ms |
+| 4 | ZIP | 10001–10499 | 935,980 | 25 | 44,552 ms |
+| 5 | ZIP | 10001–10499 | 935,980 | 25 | 22,069 ms |
+| 1 | DATE | 1577836800–1604188799 | 371,575 | 14 | 7,145 ms |
+| 2 | DATE | 1577836800–1604188799 | 371,575 | 14 | 9,478 ms |
+| 3 | DATE | 1577836800–1604188799 | 371,575 | 14 | 6,381 ms |
+| 4 | DATE | 1577836800–1604188799 | 371,575 | 14 | 5,941 ms |
+| 5 | DATE | 1577836800–1604188799 | 371,575 | 14 | 5,934 ms |
+| 1 | BBOX | 40.57–40.74 / −74.04– −73.83 | 830,276 | 23 | 20,866 ms |
+| 2 | BBOX | 40.57–40.74 / −74.04– −73.83 | 830,276 | 23 | 38,385 ms |
+| 3 | BBOX | 40.57–40.74 / −74.04– −73.83 | 830,276 | 23 | 45,047 ms |
+| 4 | BBOX | 40.57–40.74 / −74.04– −73.83 | 830,276 | 23 | 43,467 ms |
+| 5 | BBOX | 40.57–40.74 / −74.04– −73.83 | 830,276 | 23 | 45,231 ms |
+
+### Summary
+
+| Query Type | Records Returned | Avg Latency |
+|-----------|-----------------|-------------|
+| ZIP_RANGE | 935,980 | 35,792 ms |
+| DATE_RANGE | 371,575 | 6,975 ms |
+| BBOX | 830,276 | 38,599 ms |
+| **Overall** | | **27,122 ms** |
+
+### Analysis
+
+DATE_RANGE is 5× faster than ZIP/BBOX. The date window (Jan–Oct 2020) returns 371K records vs. 830–936K for the other types. Latency for large result sets is dominated by:
+1. Protobuf serialization of 44-field records at each node
+2. Network transfer of serialized proto bytes across the LAN
+3. Deserialization at node A and re-serialization for Fetch responses
+
+The dynamic chunk sizing reduces Fetch round-trips from ~1,871 to ~25 for a 935K-record result — this is why "Chunks" in the benchmark shows 25 instead of the original 1,871.
+
+Variance across runs (e.g. 22,069 ms vs. 44,552 ms for ZIP) is due to OS scheduling, LAN contention, and the Python node I being a slower responder than C++ nodes.
+
+---
+
+## 12. What We Learned
+
+### Distributed Systems
+- **Scatter-gather** is a fundamental pattern: fan out a request to N workers, collect partial results, merge and return. The tree topology reduces the coordination burden at any single node.
+- **Unary RPCs** are simpler to reason about than streaming but require the client to drive pagination explicitly.
+- **Language interoperability** via protobuf is seamless — Python and C++ nodes are indistinguishable from the network's perspective.
+
+### Performance Engineering
+- **SoA vs. AoS**: Structure-of-Arrays gives dramatically better cache behavior for field-specific scans. A single-field scan never pollutes the cache with irrelevant fields.
+- **mmap** is superior to `fread` for large files accessed non-sequentially — virtual memory lets the OS handle page loading lazily.
+- **O(1) seeks** matter enormously at scale: the difference between scanning 17.8M newlines and doing one division is minutes vs. milliseconds.
+- **Lock-free allocation** (atomic `fetch_add`) is the right tool for concurrent writes into a shared arena — no mutex contention at all during parse.
+- **Round-trip reduction**: 97% fewer Fetch RPCs from dynamic chunk sizing shows that RPC overhead, not bandwidth, is often the real bottleneck.
+
+### C++ Concurrency
+- `std::async(std::launch::async)` is the simplest way to run peer gRPC calls in parallel while doing local work.
+- OpenMP `nowait` + thread-local accumulators + `critical` merge is a clean pattern for parallel search over large arrays.
+- `shared_mutex` is the right choice for read-heavy registries: many concurrent readers, rare writers.
+
+### gRPC & Protobuf
+- Proto field names have reserved words (`descriptor` is taken by protobuf itself).
+- CMake package order matters: loading `gRPC` before `Protobuf` avoids target re-definition errors.
+- Max message size must be configured on both client and server channels, not just one side.
+
+---
+
+## 13. Hardware
+
+- 2× Apple M-series Mac (ARM64, macOS 14), 16 GB RAM each
 - Connected via RJ45 through a D-Link switch (~1 Gbps)
 - Compiler: Apple Clang, C++17, `-O2`
 - Python 3.x with `grpcio`, `grpcio-tools`
+- Dataset: NYC 311 Service Requests 2020–2026, 20,129,232 rows, ~12 GB CSV

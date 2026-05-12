@@ -84,15 +84,27 @@ def safe_float(s, default=0.0):
     try: return float(s.strip()) if s.strip() else default
     except: return default
 
+TOTAL_ROWS = 20129232
+
+def _seek_to_row(f, row_start, file_size):
+    if row_start == 0:
+        return
+    est = int(row_start / TOTAL_ROWS * file_size)
+    f.seek(max(0, est - 1))
+    f.read(1)
+    f.readline()
+
 def load_data(csv_path, row_start, row_end):
     records = []
+    file_size = os.path.getsize(csv_path)
     with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
+        if row_start == 0:
+            next(f)  # skip header
+        else:
+            _seek_to_row(f, row_start, file_size)
         reader = csv.reader(f)
-        next(reader)
         for i, row in enumerate(reader):
-            if i < row_start:
-                continue
-            if i > row_end:
+            if i > (row_end - row_start):
                 break
             if len(row) <= COL_LONGITUDE:
                 continue
