@@ -13,9 +13,46 @@ import mini2_pb2_grpc
 
 COL_UNIQUE_KEY   = 0
 COL_CREATED_DATE = 1
+COL_CLOSED_DATE  = 2
+COL_AGENCY       = 3
+COL_AGENCY_NAME  = 4
+COL_COMPLAINT    = 5
+COL_DESCRIPTOR   = 6
+COL_LOC_TYPE     = 7
+COL_ADDL_DETAILS = 8
 COL_INCIDENT_ZIP = 9
+COL_INC_ADDR     = 10
+COL_STREET       = 11
+COL_CROSS1       = 12
+COL_CROSS2       = 13
+COL_INTERSECT1   = 14
+COL_INTERSECT2   = 15
+COL_ADDR_TYPE    = 16
+COL_CITY         = 17
+COL_LANDMARK     = 18
+COL_FACILITY     = 19
+COL_STATUS       = 20
+COL_DUE_DATE     = 21
+COL_RES_DESC     = 22
+COL_RES_UPDATED  = 23
+COL_COMM_BOARD   = 24
+COL_BBL          = 25
+COL_BOROUGH      = 26
+COL_X_COORD      = 27
+COL_Y_COORD      = 28
+COL_CHANNEL      = 29
+COL_PARK_FAC     = 30
+COL_PARK_BORO    = 31
+COL_VEHICLE      = 32
+COL_TAXI_BORO    = 33
+COL_TAXI_PICKUP  = 34
+COL_BRIDGE_NAME  = 35
+COL_BRIDGE_DIR   = 36
+COL_ROAD_RAMP    = 37
+COL_BRIDGE_SEG   = 38
 COL_LATITUDE     = 41
 COL_LONGITUDE    = 42
+COL_LOCATION     = 43
 
 MAX_MSG = 64 * 1024 * 1024
 CHUNK   = 500
@@ -39,6 +76,14 @@ def parse_zip(s):
     return int(s)
 
 
+def safe_int(s, default=0):
+    try: return int(s.strip()) if s.strip() else default
+    except: return default
+
+def safe_float(s, default=0.0):
+    try: return float(s.strip()) if s.strip() else default
+    except: return default
+
 def load_data(csv_path, row_start, row_end):
     records = []
     with open(csv_path, newline='', encoding='utf-8', errors='replace') as f:
@@ -52,12 +97,50 @@ def load_data(csv_path, row_start, row_end):
             if len(row) <= COL_LONGITUDE:
                 continue
             try:
+                def g(c): return row[c].strip() if c < len(row) else ''
                 r = {
-                    'unique_key':   int(row[COL_UNIQUE_KEY]) if row[COL_UNIQUE_KEY] else 0,
-                    'created_date': parse_date(row[COL_CREATED_DATE]),
-                    'incident_zip': parse_zip(row[COL_INCIDENT_ZIP]),
-                    'latitude':     float(row[COL_LATITUDE])  if row[COL_LATITUDE]  else 0.0,
-                    'longitude':    float(row[COL_LONGITUDE]) if row[COL_LONGITUDE] else 0.0,
+                    'unique_key':            safe_int(g(COL_UNIQUE_KEY)),
+                    'created_date':          parse_date(g(COL_CREATED_DATE)),
+                    'closed_date':           parse_date(g(COL_CLOSED_DATE)),
+                    'due_date':              parse_date(g(COL_DUE_DATE)),
+                    'resolution_updated_date': parse_date(g(COL_RES_UPDATED)),
+                    'incident_zip':          parse_zip(g(COL_INCIDENT_ZIP)),
+                    'bbl':                   safe_int(g(COL_BBL)),
+                    'community_board':       safe_int(g(COL_COMM_BOARD)),
+                    'x_coord':               safe_int(g(COL_X_COORD)),
+                    'y_coord':               safe_int(g(COL_Y_COORD)),
+                    'latitude':              safe_float(g(COL_LATITUDE)),
+                    'longitude':             safe_float(g(COL_LONGITUDE)),
+                    'agency':                g(COL_AGENCY),
+                    'agency_name':           g(COL_AGENCY_NAME),
+                    'complaint_type':        g(COL_COMPLAINT),
+                    'descriptor':            g(COL_DESCRIPTOR),
+                    'location_type':         g(COL_LOC_TYPE),
+                    'address_type':          g(COL_ADDR_TYPE),
+                    'facility_type':         g(COL_FACILITY),
+                    'status':                g(COL_STATUS),
+                    'open_data_channel':     g(COL_CHANNEL),
+                    'borough_name':          g(COL_BOROUGH),
+                    'park_borough':          g(COL_PARK_BORO),
+                    'additional_details':    g(COL_ADDL_DETAILS),
+                    'incident_address':      g(COL_INC_ADDR),
+                    'street_name':           g(COL_STREET),
+                    'cross_street_1':        g(COL_CROSS1),
+                    'cross_street_2':        g(COL_CROSS2),
+                    'intersect_street_1':    g(COL_INTERSECT1),
+                    'intersect_street_2':    g(COL_INTERSECT2),
+                    'city':                  g(COL_CITY),
+                    'landmark':              g(COL_LANDMARK),
+                    'resolution_desc':       g(COL_RES_DESC),
+                    'park_facility':         g(COL_PARK_FAC),
+                    'vehicle_type':          g(COL_VEHICLE),
+                    'taxi_company_borough':  g(COL_TAXI_BORO),
+                    'taxi_pickup':           g(COL_TAXI_PICKUP),
+                    'bridge_hwy_name':       g(COL_BRIDGE_NAME),
+                    'bridge_hwy_dir':        g(COL_BRIDGE_DIR),
+                    'road_ramp':             g(COL_ROAD_RAMP),
+                    'bridge_hwy_seg':        g(COL_BRIDGE_SEG),
+                    'location':              g(COL_LOCATION),
                 }
                 records.append(r)
             except Exception:
@@ -68,12 +151,48 @@ def load_data(csv_path, row_start, row_end):
 
 def to_proto(r):
     sr = mini2_pb2.ServiceRecord()
-    sr.unique_key   = r['unique_key']
-    sr.created_date = r['created_date']
-    sr.incident_zip = r['incident_zip']
-    sr.latitude     = r['latitude']
-    sr.longitude    = r['longitude']
-    sr.borough      = 0
+    sr.unique_key              = r['unique_key']
+    sr.created_date            = r['created_date']
+    sr.closed_date             = r['closed_date']
+    sr.due_date                = r['due_date']
+    sr.resolution_updated_date = r['resolution_updated_date']
+    sr.incident_zip            = r['incident_zip']
+    sr.bbl                     = r['bbl']
+    sr.community_board         = r['community_board']
+    sr.x_coord                 = r['x_coord']
+    sr.y_coord                 = r['y_coord']
+    sr.latitude                = r['latitude']
+    sr.longitude               = r['longitude']
+    sr.agency                  = r['agency']
+    sr.agency_name             = r['agency_name']
+    sr.complaint_type          = r['complaint_type']
+    sr.descriptor              = r['descriptor']
+    sr.location_type           = r['location_type']
+    sr.address_type            = r['address_type']
+    sr.facility_type           = r['facility_type']
+    sr.status                  = r['status']
+    sr.open_data_channel       = r['open_data_channel']
+    sr.borough_name            = r['borough_name']
+    sr.park_borough            = r['park_borough']
+    sr.additional_details      = r['additional_details']
+    sr.incident_address        = r['incident_address']
+    sr.street_name             = r['street_name']
+    sr.cross_street_1          = r['cross_street_1']
+    sr.cross_street_2          = r['cross_street_2']
+    sr.intersect_street_1      = r['intersect_street_1']
+    sr.intersect_street_2      = r['intersect_street_2']
+    sr.city                    = r['city']
+    sr.landmark                = r['landmark']
+    sr.resolution_desc         = r['resolution_desc']
+    sr.park_facility           = r['park_facility']
+    sr.vehicle_type            = r['vehicle_type']
+    sr.taxi_company_borough    = r['taxi_company_borough']
+    sr.taxi_pickup             = r['taxi_pickup']
+    sr.bridge_hwy_name         = r['bridge_hwy_name']
+    sr.bridge_hwy_dir          = r['bridge_hwy_dir']
+    sr.road_ramp               = r['road_ramp']
+    sr.bridge_hwy_seg          = r['bridge_hwy_seg']
+    sr.location                = r['location']
     return sr
 
 

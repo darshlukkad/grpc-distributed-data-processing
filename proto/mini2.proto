@@ -9,12 +9,50 @@ enum QueryType {
 }
 
 message ServiceRecord {
-  uint64 unique_key   = 1;
-  uint32 created_date = 2;
-  uint32 incident_zip = 3;
-  float  latitude     = 4;
-  float  longitude    = 5;
-  uint32 borough      = 6;
+  uint64 unique_key              = 1;
+  uint32 created_date            = 2;
+  uint32 incident_zip            = 3;
+  float  latitude                = 4;
+  float  longitude               = 5;
+  uint32 closed_date             = 6;
+  uint32 due_date                = 7;
+  uint32 resolution_updated_date = 8;
+  uint64 bbl                     = 9;
+  uint32 community_board         = 10;
+  uint32 council_district        = 11;
+  uint32 police_precinct         = 12;
+  int32  x_coord                 = 13;
+  int32  y_coord                 = 14;
+  string agency                  = 15;
+  string agency_name             = 16;
+  string complaint_type          = 17;
+  string descriptor              = 18;
+  string location_type           = 19;
+  string address_type            = 20;
+  string facility_type           = 21;
+  string status                  = 22;
+  string open_data_channel       = 23;
+  string borough_name            = 24;
+  string park_borough            = 25;
+  string additional_details      = 26;
+  string incident_address        = 27;
+  string street_name             = 28;
+  string cross_street_1          = 29;
+  string cross_street_2          = 30;
+  string intersect_street_1      = 31;
+  string intersect_street_2      = 32;
+  string city                    = 33;
+  string landmark                = 34;
+  string resolution_desc         = 35;
+  string park_facility           = 36;
+  string vehicle_type            = 37;
+  string taxi_company_borough    = 38;
+  string taxi_pickup             = 39;
+  string bridge_hwy_name         = 40;
+  string bridge_hwy_dir          = 41;
+  string road_ramp               = 42;
+  string bridge_hwy_seg          = 43;
+  string location                = 44;
 }
 
 message Query {
