@@ -26,7 +26,7 @@ message ServiceRecord {
   string agency                  = 15;
   string agency_name             = 16;
   string complaint_type          = 17;
-  string descriptor              = 18;
+  string complaint_detail        = 18;
   string location_type           = 19;
   string address_type            = 20;
   string facility_type           = 21;

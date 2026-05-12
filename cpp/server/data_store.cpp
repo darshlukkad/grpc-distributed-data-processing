@@ -421,7 +421,7 @@ mini2::ServiceRecord DataStore::toProto(size_t i) const {
     sr.set_agency(std::string(reg_agency_.decode(agency_code_[i])));
     sr.set_agency_name(sv(agency_name_[i], *main_pool_));
     sr.set_complaint_type(std::string(reg_problem_.decode(problem_code_[i])));
-    sr.set_descriptor(std::string(reg_problem_detail_.decode(problem_detail_code_[i])));
+    sr.set_complaint_detail(std::string(reg_problem_detail_.decode(problem_detail_code_[i])));
     sr.set_location_type(std::string(reg_loc_type_.decode(loc_type_code_[i])));
     sr.set_address_type(std::string(reg_addr_type_.decode(addr_type_code_[i])));
     sr.set_facility_type(std::string(reg_facility_.decode(facility_code_[i])));

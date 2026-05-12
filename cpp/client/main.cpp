@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
                       << r.agency() << ","
                       << r.agency_name() << ","
                       << r.complaint_type() << ","
-                      << r.descriptor() << ","
+                      << r.complaint_detail() << ","
                       << r.location_type() << ","
                       << r.incident_zip() << ","
                       << r.incident_address() << ","

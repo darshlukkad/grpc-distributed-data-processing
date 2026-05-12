@@ -166,7 +166,7 @@ def to_proto(r):
     sr.agency                  = r['agency']
     sr.agency_name             = r['agency_name']
     sr.complaint_type          = r['complaint_type']
-    sr.descriptor              = r['descriptor']
+    sr.complaint_detail        = r['descriptor']
     sr.location_type           = r['location_type']
     sr.address_type            = r['address_type']
     sr.facility_type           = r['facility_type']
