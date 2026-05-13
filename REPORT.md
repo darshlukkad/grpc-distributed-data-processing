@@ -1,6 +1,10 @@
 # CMPE 275 — Mini 2: Distributed Scatter-Gather Query System
 ## Project Report
 
+**Team Members:** Darsh Rajesh Lukkad | Vijayshankar Mishra
+
+**Course:** CMPE 275 — Enterprise Middleware | San Jose State University
+
 ---
 
 ## 1. Overview
