@@ -86,7 +86,18 @@ message FetchResponse {
 }
 
 message ForwardResponse {
+  string forward_id = 1;
+}
+
+message ForwardFetchRequest {
+  string forward_id = 1;
+  int32  chunk_idx  = 2;
+  int32  chunk_size = 3;
+}
+
+message ForwardFetchResponse {
   repeated ServiceRecord records = 1;
+  bool                   is_last = 2;
 }
 
 message CancelRequest {
@@ -96,8 +107,9 @@ message CancelRequest {
 message CancelResponse {}
 
 service NodeService {
-  rpc Submit  (Query)         returns (SubmitResponse);
-  rpc Fetch   (FetchRequest)  returns (FetchResponse);
-  rpc Forward (Query)         returns (ForwardResponse);
-  rpc Cancel  (CancelRequest) returns (CancelResponse);
+  rpc Submit       (Query)               returns (SubmitResponse);
+  rpc Fetch        (FetchRequest)        returns (FetchResponse);
+  rpc Forward      (Query)               returns (ForwardResponse);
+  rpc ForwardFetch (ForwardFetchRequest) returns (ForwardFetchResponse);
+  rpc Cancel       (CancelRequest)       returns (CancelResponse);
 }

@@ -30,39 +30,63 @@ std::vector<mini2::ServiceRecord> NodeService::searchLocal(const mini2::Query& q
     }
 }
 
+std::vector<mini2::ServiceRecord> NodeService::fetchAllFromPeer(const PeerInfo& peer, const mini2::Query& q) const {
+    using RecVec = std::vector<mini2::ServiceRecord>;
+
+    grpc::ChannelArguments args;
+    args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, max_msg_bytes_);
+    args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH,    max_msg_bytes_);
+    auto ch   = grpc::CreateCustomChannel(peer.address, grpc::InsecureChannelCredentials(), args);
+    auto stub = mini2::NodeService::NewStub(ch);
+
+    grpc::ClientContext fwd_ctx;
+    mini2::ForwardResponse fwd_resp;
+    auto st = stub->Forward(&fwd_ctx, q, &fwd_resp);
+    if (!st.ok()) {
+        std::cerr << "[" << node_id_ << "] Forward to " << peer.id
+                  << " failed: " << st.error_message() << "\n";
+        return {};
+    }
+    std::string fwd_id = fwd_resp.forward_id();
+
+    RecVec all;
+    int offset = 0, csize = 500;
+    bool done = false;
+    while (!done) {
+        grpc::ClientContext fetch_ctx;
+        mini2::ForwardFetchRequest freq;
+        freq.set_forward_id(fwd_id);
+        freq.set_chunk_idx(offset);
+        freq.set_chunk_size(csize);
+        mini2::ForwardFetchResponse fresp;
+        st = stub->ForwardFetch(&fetch_ctx, freq, &fresp);
+        if (!st.ok()) {
+            std::cerr << "[" << node_id_ << "] ForwardFetch from " << peer.id
+                      << " failed: " << st.error_message() << "\n";
+            break;
+        }
+        for (const auto& r : fresp.records()) all.push_back(r);
+        offset += fresp.records_size();
+        done = fresp.is_last();
+        if (!done) csize = std::min(csize * 2, 50000);
+    }
+    return all;
+}
+
 std::vector<mini2::ServiceRecord> NodeService::gatherFromPeers(const mini2::Query& q) const {
     using RecVec = std::vector<mini2::ServiceRecord>;
 
     std::vector<std::future<RecVec>> futures;
     futures.reserve(peers_.size());
-
-    for (const auto& peer : peers_) {
-        futures.push_back(std::async(std::launch::async, [&peer, &q, this]() -> RecVec {
-            grpc::ChannelArguments args;
-            args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, max_msg_bytes_);
-            args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH,    max_msg_bytes_);
-            auto ch   = grpc::CreateCustomChannel(peer.address,
-                            grpc::InsecureChannelCredentials(), args);
-            auto stub = mini2::NodeService::NewStub(ch);
-
-            grpc::ClientContext ctx;
-            mini2::ForwardResponse resp;
-            auto st = stub->Forward(&ctx, q, &resp);
-            if (!st.ok()) {
-                std::cerr << "[" << node_id_ << "] Forward to " << peer.id
-                          << " failed: " << st.error_message() << "\n";
-                return {};
-            }
-            return RecVec(resp.records().begin(), resp.records().end());
-        }));
-    }
+    for (const auto& peer : peers_)
+        futures.push_back(std::async(std::launch::async,
+            [&peer, &q, this]() { return fetchAllFromPeer(peer, q); }));
 
     RecVec all;
     for (auto& f : futures) {
         auto part = f.get();
-        all.insert(all.end(),
-                   std::make_move_iterator(part.begin()),
-                   std::make_move_iterator(part.end()));
+        all.insert(all.end(), std::make_move_iterator(part.begin()),
+                               std::make_move_iterator(part.end()));
     }
     return all;
 }
@@ -112,11 +136,28 @@ grpc::Status NodeService::Forward(grpc::ServerContext*,
     auto peer_recs    = gatherFromPeers(*req);
     auto local_recs   = local_future.get();
 
-    for (auto& r : peer_recs)  *resp->add_records() = std::move(r);
-    for (auto& r : local_recs) *resp->add_records() = std::move(r);
+    peer_recs.insert(peer_recs.end(),
+                     std::make_move_iterator(local_recs.begin()),
+                     std::make_move_iterator(local_recs.end()));
 
-    std::cerr << "[" << node_id_ << "] Forward returning "
-              << resp->records_size() << " records\n";
+    std::string fwd_id = generateRequestId();
+    std::cerr << "[" << node_id_ << "] Forward storing " << peer_recs.size()
+              << " records as " << fwd_id << "\n";
+    chunks_.store(fwd_id, std::move(peer_recs));
+    resp->set_forward_id(fwd_id);
+    return grpc::Status::OK;
+}
+
+grpc::Status NodeService::ForwardFetch(grpc::ServerContext*,
+                                        const mini2::ForwardFetchRequest* req,
+                                        mini2::ForwardFetchResponse* resp) {
+    std::vector<mini2::ServiceRecord> recs;
+    bool is_last = false;
+    if (!chunks_.fetch(req->forward_id(), req->chunk_idx(), req->chunk_size(), recs, is_last))
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "unknown forward_id");
+    for (auto& r : recs) *resp->add_records() = std::move(r);
+    resp->set_is_last(is_last);
+    if (is_last) chunks_.cancel(req->forward_id());
     return grpc::Status::OK;
 }
 

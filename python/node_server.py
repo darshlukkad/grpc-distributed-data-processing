@@ -239,8 +239,20 @@ class NodeServicer(mini2_pb2_grpc.NodeServiceServicer):
         try:
             ch   = grpc.insecure_channel(peer['address'], options=opts)
             stub = mini2_pb2_grpc.NodeServiceStub(ch)
-            resp = stub.Forward(query, timeout=60)
-            return list(resp.records)
+            fwd_resp = stub.Forward(query, timeout=120)
+            fwd_id   = fwd_resp.forward_id
+            all_recs = []
+            offset, csize, done = 0, 500, False
+            while not done:
+                freq = mini2_pb2.ForwardFetchRequest(
+                    forward_id=fwd_id, chunk_idx=offset, chunk_size=csize)
+                fresp = stub.ForwardFetch(freq, timeout=120)
+                all_recs.extend(fresp.records)
+                offset += len(fresp.records)
+                done    = fresp.is_last
+                if not done:
+                    csize = min(csize * 2, 50000)
+            return all_recs
         except Exception as e:
             print(f"[{self.node_id}] forward to {peer['id']} failed: {e}", file=sys.stderr)
             return []
@@ -288,10 +300,26 @@ class NodeServicer(mini2_pb2_grpc.NodeServiceServicer):
             local_fut = ex.submit(self._search_local, request)
             peer_recs  = self._gather_peers(request)
             local_recs = local_fut.result()
-        resp = mini2_pb2.ForwardResponse()
-        resp.records.extend(peer_recs)
-        resp.records.extend(local_recs)
-        print(f"[{self.node_id}] Forward returning {len(resp.records)}", file=sys.stderr)
+        all_recs = list(peer_recs) + local_recs
+        fwd_id = f"{self.node_id}_fwd_{time.time_ns()}"
+        self._store[fwd_id] = all_recs
+        print(f"[{self.node_id}] Forward storing {len(all_recs)} as {fwd_id}", file=sys.stderr)
+        return mini2_pb2.ForwardResponse(forward_id=fwd_id)
+
+    def ForwardFetch(self, request, context):
+        recs = self._store.get(request.forward_id)
+        if recs is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details('unknown forward_id')
+            return mini2_pb2.ForwardFetchResponse()
+        csize = request.chunk_size if request.chunk_size > 0 else CHUNK
+        start = request.chunk_idx
+        end   = min(len(recs), start + csize)
+        is_last = (end >= len(recs))
+        resp = mini2_pb2.ForwardFetchResponse(is_last=is_last)
+        resp.records.extend(recs[start:end])
+        if is_last:
+            self._store.pop(request.forward_id, None)
         return resp
 
     def Cancel(self, request, context):

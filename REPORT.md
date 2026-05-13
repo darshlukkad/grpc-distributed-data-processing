@@ -158,34 +158,43 @@ Each thread accumulates matches in a thread-local vector (no locking during scan
 ## 6. Phase 3 — Dynamic Chunked Fetch
 
 ### Why Chunking
-gRPC has a maximum message size (64 MB). A query returning 935K records as `ServiceRecord` protos cannot fit in one response. Instead of streaming (which was prohibited by spec), we use a client-driven pull loop.
+gRPC has a per-message size limit (default 4 MB, raised to 64 MB in our config). A `ForwardResponse` carrying all matched records from an entire subtree could easily exceed this — node B collects results from C, D, E, F (up to 4 × 2.2M rows). A wide ZIP query across B's subtree could produce hundreds of MB of serialized proto. Instead of streaming (prohibited by spec), we use chunked pull at **both levels**: node-to-node and client-to-node.
 
-### Fixed vs. Dynamic Chunk Sizing
-Initially, chunk size was fixed at 500 records per `Fetch` call. For a 935K-record result, that's 1,871 round-trips. Each round-trip has gRPC overhead (serialization, network, deserialization). On a 1 Gbps LAN, the overhead dominates actual data transfer for small chunks.
+### Two-Level Dynamic Chunking
 
-We implemented **exponential chunk size doubling**:
+**Level 1 — Node-to-Node (ForwardFetch):**
+`Forward` no longer returns records. It stores the subtree result in its own `ChunkManager` and returns a `forward_id`. The parent node then pulls records via `ForwardFetch` with exponential chunk doubling:
 
 ```
-Fetch(offset=0,      chunk_size=500)    → 500 records
-Fetch(offset=500,    chunk_size=1000)   → 1000 records
-Fetch(offset=1500,   chunk_size=2000)   → 2000 records
-Fetch(offset=3500,   chunk_size=4000)   → 4000 records
+Forward(query)                              → forward_id
+ForwardFetch(forward_id, offset=0,    chunk_size=500)   → 500 records
+ForwardFetch(forward_id, offset=500,  chunk_size=1000)  → 1000 records
+ForwardFetch(forward_id, offset=1500, chunk_size=2000)  → 2000 records
 ...
-Fetch(offset=N,      chunk_size=50000)  → up to 50000 records, is_last=true
+ForwardFetch(forward_id, offset=N,    chunk_size=50000) → remaining, is_last=true
 ```
 
-The client starts at 500 records, doubles each successful fetch, and caps at 50,000. The `chunk_idx` proto field is repurposed as an **absolute record offset** — this lets the server honor variable chunk sizes without storing per-request state.
+**Level 2 — Client-to-Node A (Fetch):**
+Same doubling pattern for the client pulling final merged results from node A:
 
-**Result:** A 935K-record ZIP query now takes ~25 Fetch calls instead of ~1,871. The same bytes are transferred with 97% fewer round-trips.
+```
+Submit(query)                               → request_id
+Fetch(request_id, offset=0,    chunk_size=500)   → 500 records
+Fetch(request_id, offset=500,  chunk_size=1000)  → 1000 records
+...
+Fetch(request_id, offset=N,    chunk_size=50000) → remaining, is_last=true
+```
+
+The `chunk_idx` proto field is repurposed as an **absolute record offset** at both levels, allowing variable chunk sizes without the server tracking state.
+
+**Verified result (local test):** 2,176,784 records transferred in **50 chunks** — vs. **4,354 chunks** with fixed 500. Same bytes, 99% fewer round-trips.
 
 ### Memory Cleanup
-After the client receives the last chunk (`is_last=true`), the server immediately frees the result set:
+After `is_last=true` at both levels, the result set is freed immediately:
+- `ForwardFetch` handler: frees the child node's stored result after last chunk
+- `Fetch` handler: frees node A's stored result after last chunk delivered to client
 
-```cpp
-if (is_last) chunks_.cancel(req->request_id());
-```
-
-Node A's memory usage returns to baseline after each query. Without this, query result sets accumulated in `ChunkManager` forever until the process restarted.
+This prevents unbounded memory growth — A's memory returns to baseline (~1.3 GB) after every query.
 
 ---
 
@@ -193,25 +202,23 @@ Node A's memory usage returns to baseline after each query. Without this, query 
 
 ```protobuf
 service NodeService {
-    rpc Submit  (Query)         returns (SubmitResponse);   // Client → A only
-    rpc Fetch   (FetchRequest)  returns (FetchResponse);    // Client → A only
-    rpc Forward (Query)         returns (ForwardResponse);  // Node → peer node
-    rpc Cancel  (CancelRequest) returns (CancelResponse);   // Client → A only
+    rpc Submit       (Query)               returns (SubmitResponse);
+    rpc Fetch        (FetchRequest)        returns (FetchResponse);
+    rpc Forward      (Query)               returns (ForwardResponse);
+    rpc ForwardFetch (ForwardFetchRequest) returns (ForwardFetchResponse);
+    rpc Cancel       (CancelRequest)       returns (CancelResponse);
 }
 
-message FetchRequest {
-    string request_id = 1;
-    int32  chunk_idx  = 2;  // absolute record offset
-    int32  chunk_size = 3;  // 0 = use server default
-}
+// ForwardResponse returns only a forward_id — no records (eliminates 64MB limit)
+message ForwardResponse      { string forward_id = 1; }
+message ForwardFetchRequest  { string forward_id = 1; int32 chunk_idx = 2; int32 chunk_size = 3; }
+message ForwardFetchResponse { repeated ServiceRecord records = 1; bool is_last = 2; }
 
-message ServiceRecord {
-    // 44 fields: unique_key, created_date, closed_date, agency, complaint_type,
-    // incident_zip, incident_address, latitude, longitude, borough, ... (all columns)
-}
+// FetchRequest uses chunk_idx as absolute record offset for variable chunk sizes
+message FetchRequest { string request_id = 1; int32 chunk_idx = 2; int32 chunk_size = 3; }
 ```
 
-Max gRPC message size: **64 MB** on all nodes (both send and receive).
+Max gRPC message size: **64 MB** on all nodes. The `ForwardFetch` design means no single response will approach this limit — each chunk is bounded by `chunk_size` (max 50,000 records).
 
 ---
 
